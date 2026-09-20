@@ -30,9 +30,17 @@ MQTT_PASSWORD = os.getenv("MQTT_PASSWORD")
 TOPIC_CAMERA  = "haui/smartdoor/camera"
 
 # Thông số truyền ảnh
-JPEG_QUALITY  = 70    # Chất lượng nén JPEG (%) – giảm băng thông
-SEND_INTERVAL = 3     # Chu kỳ gửi ảnh (giây)
-CAMERA_INDEX  = 0     # Index webcam (0 = camera mặc định)
+JPEG_QUALITY  = 70                 # Chất lượng nén JPEG (%) – giảm băng thông
+SEND_INTERVAL = 3                  # Chu kỳ gửi ảnh (giây)
+CAMERA_INDEX  = 0                  # Index webcam (0 = camera mặc định)
+WINDOW_NAME   = "Camera Gia lap"   # Tên cửa sổ OpenCV
+
+# Hỗ trợ bắt phím từ Terminal trên hệ điều hành Windows
+try:
+    import msvcrt
+    HAS_MSVCRT = True
+except ImportError:
+    HAS_MSVCRT = False
 
 
 def create_mqtt_client() -> mqtt.Client:
@@ -86,11 +94,11 @@ def capture_and_publish(client: mqtt.Client):
     1. cv2.VideoCapture mở webcam với index đã cấu hình.
     2. Mỗi chu kỳ SEND_INTERVAL giây, đọc 1 khung hình (frame).
     3. cv2.imencode nén frame thành JPEG với chất lượng JPEG_QUALITY.
-       - Giảm kích thước dữ liệu đáng kể so với ảnh RAW, mô phỏng
-         giới hạn băng thông thực tế của ESP32-CAM.
     4. base64.b64encode chuyển dữ liệu nhị phân JPEG sang chuỗi ASCII
-       để truyền an toàn qua payload MQTT (tránh lỗi ký tự đặc biệt).
+       để truyền an toàn qua payload MQTT.
     5. Publish chuỗi Base64 lên topic camera để server AI subscribe.
+    6. Bắt phím thoát đa kênh: 'q', 'Q', ESC (trên cửa sổ lẫn terminal)
+       hoặc nút [X] đóng cửa sổ.
     """
     cap = cv2.VideoCapture(CAMERA_INDEX)
 
@@ -100,6 +108,7 @@ def capture_and_publish(client: mqtt.Client):
 
     print(f"[CAM] 📷 Webcam đã sẵn sàng (index={CAMERA_INDEX})")
     print(f"[CAM] 🔄 Bắt đầu truyền ảnh mỗi {SEND_INTERVAL}s...")
+    print("[CAM] 💡 Mẹo: Nhấn 'q' hoặc 'ESC' (trên cửa sổ camera HOẶC terminal) để thoát.")
     print("-" * 55)
 
     frame_count = 0
@@ -113,29 +122,55 @@ def capture_and_publish(client: mqtt.Client):
             ret, frame = cap.read()
             if not ret:
                 print("[CAM] ⚠️  Không đọc được frame, thử lại...")
+                time.sleep(0.01)
                 continue
 
-            # Bước 2: Hiển thị luồng video trực tiếp lên màn hình
-            # Gọi liên tục mỗi vòng lặp → video mượt mà, không bị giật
-            cv2.imshow("Camera Gia lap", frame)
+            # Bước 2: Hiển thị luồng video trực tiếp lên màn hình kèm hướng dẫn
+            display_frame = frame.copy()
+            cv2.putText(
+                display_frame,
+                "Nhan 'q' hoac ESC de thoat",
+                (10, 30),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.65,
+                (0, 255, 0),
+                2
+            )
+            cv2.putText(
+                display_frame,
+                f"Da gui: {frame_count} frames",
+                (10, 60),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.55,
+                (255, 200, 0),
+                1
+            )
+            cv2.imshow(WINDOW_NAME, display_frame)
 
-            # Bước 3: Bắt sự kiện bàn phím – thoát nhanh bằng phím 'q'
-            # cv2.waitKey(1) chờ 1ms để cập nhật cửa sổ GUI và đọc phím.
-            # Phép AND 0xFF lấy 8 bit thấp để tương thích mọi hệ điều hành.
+            # Bước 3: Bắt sự kiện thoát đa kênh:
+            # 3a. Bắt phím từ cửa sổ OpenCV (hỗ trợ cả 'q', 'Q', và phím ESC=27)
             key = cv2.waitKey(1) & 0xFF
-            if key == ord('q'):
-                print("[CAM] 🛑 Nhấn phím 'q' – Thoát chương trình.")
+            if key in (ord('q'), ord('Q'), 27):
+                print(f"[CAM] 🛑 Nhận phím thoát từ cửa sổ Camera (key code: {key}).")
                 break
 
+            # 3b. Bắt nút [X] trên thanh tiêu đề cửa sổ OpenCV
+            if cv2.getWindowProperty(WINDOW_NAME, cv2.WND_PROP_VISIBLE) < 1:
+                print("[CAM] 🛑 Đã đóng cửa sổ camera.")
+                break
+
+            # 3c. Bắt phím 'q' / 'Q' / ESC từ Terminal nếu người dùng đang focus vào console
+            if HAS_MSVCRT and msvcrt.kbhit():
+                term_key = msvcrt.getch()
+                if term_key.lower() in (b'q', b'\x1b', b'\x03'):  # 'q', ESC, Ctrl+C
+                    print("[CAM] 🛑 Nhận phím thoát từ Terminal.")
+                    break
+
             # Bước 4: Kiểm tra chu kỳ gửi MQTT (non-blocking)
-            # Thay vì dùng time.sleep(3) gây chặn toàn bộ vòng lặp,
-            # ta so sánh thời gian hiện tại với lần gửi cuối cùng.
-            # Chỉ khi đủ SEND_INTERVAL giây mới thực hiện nén + gửi ảnh.
-            # Nhờ vậy cv2.imshow() vẫn được gọi liên tục → video mượt.
             current_time = time.time()
             if current_time - last_publish_time >= SEND_INTERVAL:
 
-                # Bước 4a: Nén ảnh sang JPEG với chất lượng đã cấu hình
+                # Bước 4a: Nén ảnh gốc sang JPEG (không chứa text vẽ đè)
                 encode_params = [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY]
                 ret_encode, jpeg_buffer = cv2.imencode('.jpg', frame, encode_params)
 
@@ -167,18 +202,27 @@ def capture_and_publish(client: mqtt.Client):
 
     finally:
         # === KHỐI GIẢI PHÓNG TÀI NGUYÊN AN TOÀN ===
-        # Đảm bảo camera, cửa sổ GUI và kết nối mạng luôn được đóng
-        # đúng cách, tránh rò rỉ tài nguyên ngay cả khi có lỗi.
-        cap.release()
-        print("[CAM] 📷 Đã giải phóng webcam.")
+        if cap is not None and cap.isOpened():
+            cap.release()
+            print("[CAM] 📷 Đã giải phóng webcam.")
 
-        # Đóng tất cả cửa sổ OpenCV (imshow) để giải phóng giao diện
+        # Đóng cửa sổ OpenCV và gọi waitKey để hệ điều hành Windows huỷ triệt để giao diện
         cv2.destroyAllWindows()
+        for _ in range(5):
+            cv2.waitKey(1)
         print("[CAM] 🖥️  Đã đóng cửa sổ hiển thị.")
 
-        client.loop_stop()
-        client.disconnect()
-        print("[MQTT] 🔌 Đã ngắt kết nối MQTT.")
+        try:
+            client.disconnect()
+            print("[MQTT] 🔌 Đã ngắt kết nối MQTT.")
+        except Exception:
+            pass
+
+        try:
+            client.loop_stop()
+        except Exception:
+            pass
+
         print(f"[CAM] 📊 Tổng số frame đã gửi: {frame_count}")
 
 
