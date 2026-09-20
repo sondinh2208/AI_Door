@@ -53,7 +53,7 @@ TOPIC_CONTROL = "haui/smartdoor/control"        # Gửi lệnh điều khiển
 # Cấu hình AI
 MODEL_NAME       = "Facenet512"    # Mô hình nhận diện (512-d embedding)
 DISTANCE_METRIC  = "cosine"        # Metric đo khoảng cách vector đặc trưng
-DETECTOR_BACKEND = "retinaface"    # Bộ phát hiện khuôn mặt (thay thế opencv/haar cascade)
+DETECTOR_BACKEND = "yolov8n"       # Bộ phát hiện khuôn mặt (YOLOv8 nano - cực nhanh)
 FACES_DB_PATH    = "faces_db/"     # Thư mục chứa ảnh khuôn mặt đã đăng ký
 ANTI_SPOOFING    = True            # Bật chống giả mạo khuôn mặt (FASNet)
 
