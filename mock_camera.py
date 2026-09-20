@@ -35,6 +35,12 @@ SEND_INTERVAL = 3                  # Chu kỳ gửi ảnh (giây)
 CAMERA_INDEX  = 0                  # Index webcam (0 = camera mặc định)
 WINDOW_NAME   = "Camera Gia lap"   # Tên cửa sổ OpenCV
 
+# Cấu hình chiều camera:
+# FLIP_HORIZONTAL = True : Lật gương trái <-> phải (thường gặp nhất ở webcam)
+# FLIP_VERTICAL   = True : Lật ngược đầu trên <-> dưới (nếu camera gắn ngược)
+FLIP_HORIZONTAL = True             # Mặc định bật lật gương ngang
+FLIP_VERTICAL   = False            # Mặc định không lật dọc
+
 # Hỗ trợ bắt phím từ Terminal trên hệ điều hành Windows
 try:
     import msvcrt
@@ -108,10 +114,15 @@ def capture_and_publish(client: mqtt.Client):
 
     print(f"[CAM] 📷 Webcam đã sẵn sàng (index={CAMERA_INDEX})")
     print(f"[CAM] 🔄 Bắt đầu truyền ảnh mỗi {SEND_INTERVAL}s...")
-    print("[CAM] 💡 Mẹo: Nhấn 'q' hoặc 'ESC' (trên cửa sổ camera HOẶC terminal) để thoát.")
+    print("[CAM] 💡 Phím nóng:")
+    print("      - 'q' hoặc ESC : Thoát chương trình")
+    print("      - 'f'          : Đổi chế độ lật gương ngang (Trái <-> Phải)")
+    print("      - 'v'          : Đổi chế độ lật ngược đầu (Trên <-> Dưới)")
     print("-" * 55)
 
     frame_count = 0
+    flip_h = FLIP_HORIZONTAL
+    flip_v = FLIP_VERTICAL
 
     # Biến theo dõi thời gian gửi MQTT – khởi tạo = 0 để gửi ngay frame đầu tiên
     last_publish_time = 0.0
@@ -125,46 +136,68 @@ def capture_and_publish(client: mqtt.Client):
                 time.sleep(0.01)
                 continue
 
+            # Xử lý lật khung hình nếu camera bị ngược
+            if flip_h and flip_v:
+                frame = cv2.flip(frame, -1)   # Lật cả 2 chiều (xoay 180 độ)
+            elif flip_h:
+                frame = cv2.flip(frame, 1)    # Lật gương ngang (trái <-> phải)
+            elif flip_v:
+                frame = cv2.flip(frame, 0)    # Lật ngược đầu (trên <-> dưới)
+
             # Bước 2: Hiển thị luồng video trực tiếp lên màn hình kèm hướng dẫn
             display_frame = frame.copy()
             cv2.putText(
                 display_frame,
-                "Nhan 'q' hoac ESC de thoat",
+                "Nhan 'q': Thoat | 'f': Lat ngang | 'v': Lat doc",
                 (10, 30),
                 cv2.FONT_HERSHEY_SIMPLEX,
-                0.65,
+                0.55,
                 (0, 255, 0),
                 2
             )
+            h_str = "Bat" if flip_h else "Tat"
+            v_str = "Bat" if flip_v else "Tat"
             cv2.putText(
                 display_frame,
-                f"Da gui: {frame_count} frames",
+                f"Da gui: {frame_count} | Lat ngang (f): {h_str} | Lat doc (v): {v_str}",
                 (10, 60),
                 cv2.FONT_HERSHEY_SIMPLEX,
-                0.55,
+                0.50,
                 (255, 200, 0),
                 1
             )
             cv2.imshow(WINDOW_NAME, display_frame)
 
-            # Bước 3: Bắt sự kiện thoát đa kênh:
-            # 3a. Bắt phím từ cửa sổ OpenCV (hỗ trợ cả 'q', 'Q', và phím ESC=27)
+            # Bước 3: Bắt sự kiện thoát và đổi chiều camera:
+            # 3a. Bắt phím từ cửa sổ OpenCV
             key = cv2.waitKey(1) & 0xFF
             if key in (ord('q'), ord('Q'), 27):
                 print(f"[CAM] 🛑 Nhận phím thoát từ cửa sổ Camera (key code: {key}).")
                 break
+            elif key in (ord('f'), ord('F')):
+                flip_h = not flip_h
+                print(f"[CAM] 🔄 Lật gương ngang (Trái <-> Phải): {'BẬT' if flip_h else 'TẮT'}")
+            elif key in (ord('v'), ord('V')):
+                flip_v = not flip_v
+                print(f"[CAM] 🔄 Lật ngược đầu (Trên <-> Dưới): {'BẬT' if flip_v else 'TẮT'}")
 
             # 3b. Bắt nút [X] trên thanh tiêu đề cửa sổ OpenCV
             if cv2.getWindowProperty(WINDOW_NAME, cv2.WND_PROP_VISIBLE) < 1:
                 print("[CAM] 🛑 Đã đóng cửa sổ camera.")
                 break
 
-            # 3c. Bắt phím 'q' / 'Q' / ESC từ Terminal nếu người dùng đang focus vào console
+            # 3c. Bắt phím từ Terminal nếu người dùng đang focus vào console
             if HAS_MSVCRT and msvcrt.kbhit():
-                term_key = msvcrt.getch()
-                if term_key.lower() in (b'q', b'\x1b', b'\x03'):  # 'q', ESC, Ctrl+C
+                term_key = msvcrt.getch().lower()
+                if term_key in (b'q', b'\x1b', b'\x03'):  # 'q', ESC, Ctrl+C
                     print("[CAM] 🛑 Nhận phím thoát từ Terminal.")
                     break
+                elif term_key == b'f':
+                    flip_h = not flip_h
+                    print(f"[CAM] 🔄 Lật gương ngang (Trái <-> Phải): {'BẬT' if flip_h else 'TẮT'}")
+                elif term_key == b'v':
+                    flip_v = not flip_v
+                    print(f"[CAM] 🔄 Lật ngược đầu (Trên <-> Dưới): {'BẬT' if flip_v else 'TẮT'}")
 
             # Bước 4: Kiểm tra chu kỳ gửi MQTT (non-blocking)
             current_time = time.time()

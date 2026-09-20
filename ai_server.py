@@ -14,6 +14,8 @@ import os
 # CẤU HÌNH BACKEND KERAS -> PYTORCH (PHẢI ĐẶT TRƯỚC KHI IMPORT DEEPFACE)
 # ====================================================================
 os.environ["KERAS_BACKEND"] = "torch"
+# Hạ ngưỡng phát hiện của YOLO để nhận diện nhạy hơn trong điều kiện chói lóa/bóng đổ
+os.environ["YOLO_MIN_DETECTION_CONFIDENCE"] = "0.15"
 
 import cv2
 import base64
@@ -49,8 +51,13 @@ DETECTOR_BACKEND = "yolov8n"       # YOLOv8 Nano cực nhanh
 FACES_DB_PATH    = "faces_db/"     # Thư mục cơ sở dữ liệu khuôn mặt
 ANTI_SPOOFING    = True            # Bật kiểm tra chống giả mạo (FASNet)
 
-# Ngưỡng khoảng cách an toàn cho Facenet512 + Cosine (chuẩn an toàn: 0.30)
-DISTANCE_THRESHOLD = 0.30
+# Ngưỡng khoảng cách an toàn cho Facenet512 + Cosine (0.35 tối ưu cho cả đèn rọi và ban đêm)
+DISTANCE_THRESHOLD = 0.35
+
+# Cấu hình tiền xử lý chống lóa sáng (Cơ chế CLAHE Fallback trên không gian màu LAB)
+ENABLE_CLAHE       = True          # Bật cơ chế cứu hộ CLAHE khi bị lóa sáng nặng
+CLAHE_CLIP_LIMIT   = 2.0           # Giới hạn tương phản (2.0 - 3.0)
+CLAHE_GRID_SIZE    = (8, 8)        # Kích thước lưới chia vùng cục bộ (8x8)
 
 # ====================================================================
 # HÀNG ĐỢI KHUNG HÌNH (Frame Queue)
@@ -107,6 +114,33 @@ def decode_base64_to_image(b64_string: str) -> np.ndarray:
     return image
 
 
+def preprocess_anti_glare_clahe(
+    image_bgr: np.ndarray,
+    clip_limit: float = CLAHE_CLIP_LIMIT,
+    tile_grid_size: tuple = CLAHE_GRID_SIZE
+) -> np.ndarray:
+    """
+    Tiền xử lý giảm lóa sáng, khôi phục chi tiết khuôn mặt bằng CLAHE trên kênh L (LAB).
+    - Chuyển BGR -> LAB để tách biệt kênh L (Lightness) và A, B (màu sắc).
+    - Cân bằng histogram thích ứng cục bộ (CLAHE) trên kênh L để dập tắt lóa sáng.
+    - Giữ nguyên 100% màu da tự nhiên ở kênh A và B.
+    """
+    if image_bgr is None or image_bgr.size == 0:
+        return image_bgr
+
+    # Bước 1: Chuyển sang không gian màu LAB
+    lab = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2LAB)
+    l_channel, a_channel, b_channel = cv2.split(lab)
+
+    # Bước 2: Áp dụng CLAHE chỉ trên kênh L
+    clahe = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=tile_grid_size)
+    l_clahe = clahe.apply(l_channel)
+
+    # Bước 3: Gộp lại và chuyển về BGR
+    enhanced_lab = cv2.merge((l_clahe, a_channel, b_channel))
+    return cv2.cvtColor(enhanced_lab, cv2.COLOR_LAB2BGR)
+
+
 def check_anti_spoofing(image: np.ndarray) -> tuple:
     """
     Kiểm tra tính chân thực của khuôn mặt (người thật vs ảnh giả mạo).
@@ -131,21 +165,32 @@ def check_anti_spoofing(image: np.ndarray) -> tuple:
 
 def process_face_recognition(image: np.ndarray, client: mqtt.Client):
     """
-    Xử lý nhận diện với định dạng in log chuyên nghiệp:
-    1. "Chờ người dùng" : Không phát hiện mặt -> Chờ, TUYỆT ĐỐI KHÔNG publish MQTT.
-    2. "Giả mạo"        : Phát hiện giả mạo   -> Cảnh báo FAKE, publish "DENIED".
-    3. "Từ chối"        : Người lạ / xa ngưỡng -> Từ chối, publish "DENIED".
-    4. "Chấp nhận"      : Chủ nhà hợp lệ     -> Thành công, publish "OPEN_FACE".
+    Xử lý nhận diện với cơ chế đa tầng thích ứng ánh sáng:
+    1. Ưu tiên quét trên ảnh gốc để giữ nguyên vẹn chất lượng da cho Anti-Spoofing.
+    2. Nếu ảnh bị lóa sáng gắt không thấy mặt -> Tự động Fallback sang CLAHE.
     """
     start_time = time.time()
 
     try:
         spoof_score = 1.0
+        face_img = image
+
         # ================================================================
         # BƯỚC 1: PHÁT HIỆN MẶT & KIỂM TRA CHỐNG GIẢ MẠO (ANTI-SPOOFING)
         # ================================================================
         if ANTI_SPOOFING:
-            is_real, spoof_score = check_anti_spoofing(image)
+            try:
+                # Quét trên ảnh gốc trước để giữ nguyên vẹn kết cấu da tự nhiên
+                is_real, spoof_score = check_anti_spoofing(image)
+            except ValueError:
+                # Nếu ảnh gốc bị lóa sáng nặng khiến YOLO không tìm thấy mặt
+                if ENABLE_CLAHE:
+                    # Kích hoạt Fallback: dùng ảnh cân bằng sáng CLAHE để cứu nguy
+                    clahe_img = preprocess_anti_glare_clahe(image)
+                    is_real, spoof_score = check_anti_spoofing(clahe_img)
+                    face_img = clahe_img
+                else:
+                    raise
 
             if not is_real:
                 # -------------------------------------------------------------
@@ -167,7 +212,7 @@ def process_face_recognition(image: np.ndarray, client: mqtt.Client):
         # BƯỚC 2: SO KHỚP ĐẶC TRƯNG KHUÔN MẶT (FACENET512)
         # ================================================================
         results = DeepFace.find(
-            img_path=image,
+            img_path=face_img,
             db_path=FACES_DB_PATH,
             model_name=MODEL_NAME,
             detector_backend=DETECTOR_BACKEND,
@@ -327,6 +372,7 @@ if __name__ == "__main__":
     print("  AI SERVER – Hệ thống Khóa cửa Thông minh")
     print("  Mô hình: Facenet512 | Detector: YOLOv8n")
     print("  Bảo vệ: Anti-Spoofing (FASNet)")
+    print(f"  Tiền xử lý CLAHE: {'BẬT ☀️' if ENABLE_CLAHE else 'TẮT'}")
     print("=" * 55)
 
     if not os.path.exists(FACES_DB_PATH):
