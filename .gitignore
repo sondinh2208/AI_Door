@@ -1,0 +1,17 @@
+# Môi trường ảo Python
+venv/
+env/
+.env
+
+# Cache và file tạm của Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Dữ liệu nhạy cảm (Cơ sở dữ liệu khuôn mặt)
+faces_db/
+
+# Các file IDE (tuỳ chọn)
+.vscode/
+.idea/
