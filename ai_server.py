@@ -51,13 +51,19 @@ DETECTOR_BACKEND = "yolov8n"       # YOLOv8 Nano cực nhanh
 FACES_DB_PATH    = "faces_db/"     # Thư mục cơ sở dữ liệu khuôn mặt
 ANTI_SPOOFING    = True            # Bật kiểm tra chống giả mạo (FASNet)
 
-# Ngưỡng khoảng cách an toàn cho Facenet512 + Cosine (0.35 tối ưu cho cả đèn rọi và ban đêm)
-DISTANCE_THRESHOLD = 0.35
+# Ngưỡng khoảng cách cho Facenet512 + Cosine (0.38 tối ưu cho cả cự ly gần và cự ly xa 1 - 1.5m)
+DISTANCE_THRESHOLD = 0.38
+LAST_AI_SCAN = 0
 
 # Cấu hình tiền xử lý chống lóa sáng (Cơ chế CLAHE Fallback trên không gian màu LAB)
 ENABLE_CLAHE       = True          # Bật cơ chế cứu hộ CLAHE khi bị lóa sáng nặng
 CLAHE_CLIP_LIMIT   = 2.0           # Giới hạn tương phản (2.0 - 3.0)
 CLAHE_GRID_SIZE    = (8, 8)        # Kích thước lưới chia vùng cục bộ (8x8)
+
+# Cấu hình chiều camera (sửa lỗi camera bị lắp ngược đầu)
+ROTATE_CAMERA      = 180           # 0: Không xoay | 180: Xoay ngược 180° | 90: Xoay 90° | 270: Xoay 270°
+FLIP_HORIZONTAL    = False         # True: Lật gương ngang (Trái <-> Phải)
+FLIP_VERTICAL      = False         # True: Lật ngược dọc (Trên <-> Dưới)
 
 # ====================================================================
 # HÀNG ĐỢI KHUNG HÌNH (Frame Queue)
@@ -114,6 +120,31 @@ def decode_base64_to_image(b64_string: str) -> np.ndarray:
     return image
 
 
+def orient_image(image: np.ndarray) -> np.ndarray:
+    """
+    Điều chỉnh chiều khung hình (xoay 180°, 90°, lật gương ngang/dọc).
+    Khắc phục trường hợp camera ESP32 bị lắp ngược đầu.
+    """
+    if image is None or image.size == 0:
+        return image
+
+    # Xoay khung hình
+    if ROTATE_CAMERA == 180:
+        image = cv2.rotate(image, cv2.ROTATE_180)
+    elif ROTATE_CAMERA == 90:
+        image = cv2.rotate(image, cv2.ROTATE_90_CLOCKWISE)
+    elif ROTATE_CAMERA == 270:
+        image = cv2.rotate(image, cv2.ROTATE_90_COUNTERCLOCKWISE)
+
+    # Lật gương
+    if FLIP_HORIZONTAL:
+        image = cv2.flip(image, 1)  # 1: Lật ngang (trái <-> phải)
+    if FLIP_VERTICAL:
+        image = cv2.flip(image, 0)  # 0: Lật dọc (trên <-> dưới)
+
+    return image
+
+
 def preprocess_anti_glare_clahe(
     image_bgr: np.ndarray,
     clip_limit: float = CLAHE_CLIP_LIMIT,
@@ -139,6 +170,20 @@ def preprocess_anti_glare_clahe(
     # Bước 3: Gộp lại và chuyển về BGR
     enhanced_lab = cv2.merge((l_clahe, a_channel, b_channel))
     return cv2.cvtColor(enhanced_lab, cv2.COLOR_LAB2BGR)
+
+
+def enhance_image_clarity(image_bgr: np.ndarray) -> np.ndarray:
+    """
+    Tăng cường độ nét (Unsharp Mask) và phục hồi vi mô chi tiết khuôn mặt (mắt, mũi, môi)
+    khi người dùng đứng ở cự ly xa (1m - 2m) trên camera phân giải thấp (QVGA).
+    """
+    if image_bgr is None or image_bgr.size == 0:
+        return image_bgr
+
+    # Unsharp Mask: Tăng cường chi tiết cạnh nhưng không gây nhiễu hạt
+    gaussian = cv2.GaussianBlur(image_bgr, (0, 0), sigmaX=1.5)
+    sharpened = cv2.addWeighted(image_bgr, 1.35, gaussian, -0.35, 0)
+    return sharpened
 
 
 def check_anti_spoofing(image: np.ndarray) -> tuple:
@@ -211,13 +256,17 @@ def process_face_recognition(image: np.ndarray, client: mqtt.Client):
         # ================================================================
         # BƯỚC 2: SO KHỚP ĐẶC TRƯNG KHUÔN MẶT (FACENET512)
         # ================================================================
+        # Tăng cường độ nét ảnh giúp mô hình nhận diện tốt hơn khi đứng xa
+        enhanced_face_img = enhance_image_clarity(face_img)
+
         results = DeepFace.find(
-            img_path=face_img,
+            img_path=enhanced_face_img,
             db_path=FACES_DB_PATH,
             model_name=MODEL_NAME,
             detector_backend=DETECTOR_BACKEND,
             distance_metric=DISTANCE_METRIC,
             enforce_detection=False,
+            similarity_search=True,
             silent=True
         )
 
@@ -244,7 +293,7 @@ def process_face_recognition(image: np.ndarray, client: mqtt.Client):
                 # -------------------------------------------------------------
                 print("[AI] ✅ NHẬN DIỆN THÀNH CÔNG")
                 print(f"     👤 Người dùng : {user_name}")
-                print(f"     📐 Distance   : {distance:.6f}")
+                print(f"     📐 Distance   : {distance:.6f} <= {DISTANCE_THRESHOLD}")
                 print("     🛡️  Anti-Spoof : REAL")
                 print(f"     ⏱️  Xử lý     : {elapsed:.4f}s")
                 print("     🔓 Lệnh       : OPEN_FACE")
@@ -255,7 +304,7 @@ def process_face_recognition(image: np.ndarray, client: mqtt.Client):
                 # TRẠNG THÁI 3: "TỪ CHỐI" (NGƯỜI LẠ - KHOẢNG CÁCH QUÁ XA)
                 # -------------------------------------------------------------
                 print("[AI] ❌ KẺ LẠ MẶT - TỪ CHỐI")
-                print("     👤 Người dùng : Không xác định (Người lạ)")
+                print(f"     👤 Khớp nhất  : {user_name}")
                 print(f"     📐 Distance   : {distance:.6f} > {DISTANCE_THRESHOLD}")
                 print("     🛡️  Anti-Spoof : REAL")
                 print(f"     ⏱️  Xử lý     : {elapsed:.4f}s")
@@ -290,17 +339,66 @@ def process_face_recognition(image: np.ndarray, client: mqtt.Client):
 
 def process_frames(client: mqtt.Client):
     """
-    Worker Thread chạy ngầm: Lấy ảnh từ queue và tiến hành nhận diện.
+    Worker Thread chạy ngầm: Lấy ảnh từ queue, điều chỉnh chiều và tiến hành nhận diện.
+    Hỗ trợ phím tắt điều chỉnh trực tiếp trên cửa sổ camera:
+      - 'r': Đổi góc xoay (180° -> 0° -> 90° -> 270°)
+      - 'f': Bật/Tắt lật ngang (Trái <-> Phải)
+      - 'v': Bật/Tắt lật dọc (Trên <-> Dưới)
     """
+    global ROTATE_CAMERA, FLIP_HORIZONTAL, FLIP_VERTICAL, LAST_AI_SCAN
     print("[THREAD] 🔄 Luồng xử lý AI đã sẵn sàng.")
 
     while True:
         try:
-            image = frame_queue.get(timeout=1.0)
-            print(f"[AI] 🖼️  Kích thước ảnh: {image.shape[1]}x{image.shape[0]}")
-            process_face_recognition(image, client)
+            raw_image = frame_queue.get(timeout=1.0)
+
+            # Điều chỉnh chiều xoay / lật camera (khắc phục camera bị ngược)
+            image = orient_image(raw_image)
+
+            # Hiển thị luồng video lên cửa sổ Live Camera
+            cv2.imshow("ESP32-S3 Live Camera", image)
+
+            # Bắt phím điều chỉnh khi người dùng thao tác trên cửa sổ
+            key = cv2.waitKey(1) & 0xFF
+            if key in (ord('r'), ord('R')):
+                rot_cycle = {180: 0, 0: 90, 90: 270, 270: 180}
+                ROTATE_CAMERA = rot_cycle.get(ROTATE_CAMERA, 180)
+                print(f"[CAM] 🔄 Phím 'r': Đổi góc xoay -> {ROTATE_CAMERA}°")
+            elif key in (ord('f'), ord('F')):
+                FLIP_HORIZONTAL = not FLIP_HORIZONTAL
+                print(f"[CAM] 🔄 Phím 'f': Lật ngang (Trái <-> Phải) -> {'BẬT' if FLIP_HORIZONTAL else 'TẮT'}")
+            elif key in (ord('v'), ord('V')):
+                FLIP_VERTICAL = not FLIP_VERTICAL
+                print(f"[CAM] 🔄 Phím 'v': Lật dọc (Trên <-> Dưới) -> {'BẬT' if FLIP_VERTICAL else 'TẮT'}")
+            elif key in (ord('s'), ord('S')):
+                # Lưu trực tiếp ảnh mẫu chụp từ camera tại cự ly này vào faces_db/Dinh Cong Son
+                target_user = "Dinh Cong Son"
+                user_folder = os.path.join(FACES_DB_PATH, target_user)
+                if not os.path.exists(user_folder):
+                    os.makedirs(user_folder, exist_ok=True)
+
+                filename = f"esp32_dist_{int(time.time())}.jpg"
+                filepath = os.path.join(user_folder, filename)
+                cv2.imwrite(filepath, image)
+
+                # Xóa file cache .pkl để DeepFace tự động nạp lại ảnh mới
+                for f in os.listdir(FACES_DB_PATH):
+                    if f.endswith(".pkl"):
+                        try:
+                            os.remove(os.path.join(FACES_DB_PATH, f))
+                        except Exception:
+                            pass
+                print(f"[DB] 📸 Đã lưu ảnh mẫu cự ly này: {filepath}")
+                print("[DB] 🔄 Đã làm mới cơ sở dữ liệu khuôn mặt! Lần quét tới sẽ nhận diện ngay.")
+
+            current_time = time.time()
+            if current_time - LAST_AI_SCAN >= 4.0:
+                print(f"[AI] 🖼️  Kích thước ảnh: {image.shape[1]}x{image.shape[0]}")
+                process_face_recognition(image, client)
+                LAST_AI_SCAN = time.time()
 
         except queue.Empty:
+            cv2.waitKey(1)
             continue
         except Exception as e:
             print(f"[THREAD] ❌ Lỗi luồng: {e}")
@@ -331,6 +429,7 @@ def create_mqtt_client() -> mqtt.Client:
             client.subscribe(TOPIC_CAMERA)
             print(f"[MQTT] 📡 Đã subscribe: {TOPIC_CAMERA}")
             print("[AI] 🔍 Hệ thống sẵn sàng nhận diện...\n" + "=" * 55)
+            client.publish(TOPIC_CONTROL, "READY")
         else:
             print(f"[MQTT] ❌ Kết nối thất bại, rc: {rc}")
 
@@ -373,6 +472,8 @@ if __name__ == "__main__":
     print("  Mô hình: Facenet512 | Detector: YOLOv8n")
     print("  Bảo vệ: Anti-Spoofing (FASNet)")
     print(f"  Tiền xử lý CLAHE: {'BẬT ☀️' if ENABLE_CLAHE else 'TẮT'}")
+    print(f"  Định hướng Camera: Xoay {ROTATE_CAMERA}° | Lật ngang: {'BẬT' if FLIP_HORIZONTAL else 'TẮT'} | Lật dọc: {'BẬT' if FLIP_VERTICAL else 'TẮT'}")
+    print("  (Phím tắt trên cửa sổ Cam: 'r': Xoay | 'f': Lật ngang | 'v': Lật dọc)")
     print("=" * 55)
 
     if not os.path.exists(FACES_DB_PATH):
@@ -403,5 +504,6 @@ if __name__ == "__main__":
         print("\n[SYS] 🛑 Nhận tín hiệu ngắt (Ctrl+C).")
     finally:
         mqtt_client.disconnect()
+        cv2.destroyAllWindows()
         print("[MQTT] 🔌 Đã ngắt kết nối MQTT.")
         print("[SYS] 👋 Server AI đã dừng.")
