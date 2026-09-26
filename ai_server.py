@@ -52,7 +52,7 @@ FACES_DB_PATH    = "faces_db/"     # Thư mục cơ sở dữ liệu khuôn mặ
 ANTI_SPOOFING    = True            # Bật kiểm tra chống giả mạo (FASNet)
 
 # Ngưỡng khoảng cách cho Facenet512 + Cosine (0.38 tối ưu cho cả cự ly gần và cự ly xa 1 - 1.5m)
-DISTANCE_THRESHOLD = 0.38
+DISTANCE_THRESHOLD = 0.5
 LAST_AI_SCAN = 0
 
 # Cấu hình tiền xử lý chống lóa sáng (Cơ chế CLAHE Fallback trên không gian màu LAB)
@@ -61,7 +61,7 @@ CLAHE_CLIP_LIMIT   = 2.0           # Giới hạn tương phản (2.0 - 3.0)
 CLAHE_GRID_SIZE    = (8, 8)        # Kích thước lưới chia vùng cục bộ (8x8)
 
 # Cấu hình chiều camera (sửa lỗi camera bị lắp ngược đầu)
-ROTATE_CAMERA      = 180           # 0: Không xoay | 180: Xoay ngược 180° | 90: Xoay 90° | 270: Xoay 270°
+ROTATE_CAMERA      = 0           # 0: Không xoay | 180: Xoay ngược 180° | 90: Xoay 90° | 270: Xoay 270°
 FLIP_HORIZONTAL    = False         # True: Lật gương ngang (Trái <-> Phải)
 FLIP_VERTICAL      = False         # True: Lật ngược dọc (Trên <-> Dưới)
 
@@ -331,6 +331,7 @@ def process_face_recognition(image: np.ndarray, client: mqtt.Client):
         # Chỉ in log chờ người dùng, TUYỆT ĐỐI KHÔNG publish lệnh MQTT nào
         print("[AI] ⏳ Đang chờ người dùng đứng vào camera...")
         print("-" * 55)
+        client.publish(TOPIC_CONTROL, "NO_FACE")
 
     except Exception as e:
         print(f"[AI] ⚠️  Lỗi xử lý: {e}")
