@@ -52,7 +52,7 @@ FACES_DB_PATH    = "faces_db/"     # Thư mục cơ sở dữ liệu khuôn mặ
 ANTI_SPOOFING    = True            # Bật kiểm tra chống giả mạo (FASNet)
 
 # Ngưỡng khoảng cách cho Facenet512 + Cosine (0.38 tối ưu cho cả cự ly gần và cự ly xa 1 - 1.5m)
-DISTANCE_THRESHOLD = 0.5
+DISTANCE_THRESHOLD = 0.4
 LAST_AI_SCAN = 0
 
 # Cấu hình tiền xử lý chống lóa sáng (Cơ chế CLAHE Fallback trên không gian màu LAB)
